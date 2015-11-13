@@ -27,7 +27,7 @@ module.exports = function(RED) {
                 if (topics.indexOf(",") > -1){
                     var topicArry = topics.split(',');
 
-                    for (i = 0; i < topicArry.length; i++) {
+                    for (var i = 0; i < topicArry.length; i++) {
                         payloads.push({topic: topicArry[i], messages: msg.payload});
                     }
                 }
@@ -65,12 +65,10 @@ module.exports = function(RED) {
         var node = this;
 
         var kafka = require('kafka-node');
-        var HighLevelConsumer = kafka.HighLevelConsumer;
-        var Client = kafka.Client;
         var topics = String(config.topics);
         var clusterZookeeper = config.zkquorum;
         var groupId = config.groupId;
-        var client = new Client(clusterZookeeper);
+
 
         var topicJSONArry = [];
 
@@ -81,7 +79,7 @@ module.exports = function(RED) {
             console.log(topicArry.length);
 
 
-            for (i = 0; i < topicArry.length; i++) {
+            for (var i = 0; i < topicArry.length; i++) {
                 console.log(topicArry[i]);
                 topicJSONArry.push({topic: topicArry[i]});
             }
@@ -97,28 +95,100 @@ module.exports = function(RED) {
             autoCommitMsgCount: 10
         };
 
+        var currentConsumer = new retryConsumer(node, kafka, topics, clusterZookeeper, options);
+
+        currentConsumer.run();
+
+
+
+
+    }
+
+    retryConsumer.prototype.kickstart= function(){
+        var self= this;
+        self.dead = true;//make sure
+
+
+        setTimeout(function(){
+            self.node.currentConsumer = new retryConsumer(self.node, self.kafka, self.topics, self.clusterZookeeper, self.options);
+            self.node.currentConsumer.run();
+
+        },self.restartWaitTime);
 
         try {
-            var consumer = new HighLevelConsumer(client, topics, options);
-            this.log("Consumer created...");
+            if (self.consumer) {
+                var tc = self.consumer; //switchroo make sure we set it to null before doing close
+                self.consumer = null;
+                tc.close();
+
+            }
+        } catch (e) {
+            console.log('exception while closing:' +e);
+        }
+
+    };
+
+    function retryConsumer(node, kafka, topics, clusterZookeeper, options){
+        var self = this;
+
+        self.node = node;
+        self.clusterZookeeper = clusterZookeeper;
+        self.kafka = kafka;
+
+        self.client = new kafka.Client(clusterZookeeper);
+        self.dead = false;  //a safety check to make sure that once we think this instance is dead we don't use it anymore.
+        self.topics = topics;
+        self.options = options;
+        self.HighLevelConsumer = kafka.HighLevelConsumer;
+        self.restartWaitTime = 5000;
+
+
+    }
+
+    retryConsumer.prototype.run= function run(){
+        var self = this;
+
+        try {
+            var consumer = new self.HighLevelConsumer(self.client, self.topics, self.options);
+            self.consumer = consumer;
+            console.log("Consumer created...");
+
+            //helps to uncomment these for issues.
+            //consumer.on('done', function(message){console.log('done:'+ message);})
+            //consumer.on('ready', function(message){console.log('ready:'+ message);})
+            //consumer.on('connect', function(message){console.log('connect:'+ message);})
+            //consumer.on('close', function(message){console.log('close:'+ message);})
+
+
+
 
             consumer.on('message', function (message) {
+                if(self.dead) return;
                 console.log(message);
-                node.log(message);
+                self.node.log(message);
                 var msg = {payload: message};
-                node.send(msg);
+                self.node.send(msg);
             });
 
             
             consumer.on('error', function (err) {
-               console.error(err);
+                if(self.dead)return;
+                self.dead = true;
+                console.log("CONSOLE ERROR" +err);
+                self.node.error("CONSOLE ERROR" +err);
+                self.kickstart();
+
+
             });
         }
         catch(e){
-            node.error(e);
-            return;
+            if(self.dead)return;
+            self.dead = true;
+            console.log("catch" +e);
+            self.node.error("Catch error" +e);
+            self.kickstart();
         }
-    }
+    };
 
     RED.nodes.registerType("kafka in", kafkaInNode);
 };
